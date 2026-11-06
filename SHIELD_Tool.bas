@@ -285,10 +285,11 @@ End Sub
 ' =====================================================================
 Public Sub UpdateSAP()
     Dim sess As Object, folder As String, fullPath As String, pathSet As Boolean, t As Single
-    Dim wh As String, pick As Variant
+    Dim wh As String, pick As Variant, stp As String, layoutName As String, found As String, ans As String
 
     Set sess = GetSapSession()
     If sess Is Nothing Then Exit Sub
+    EnsureSetting "SAPLayout", 34, "SAP layout (LX02)", "name of your LX02 layout - empty = you are asked / row " & SAP_LAYOUT_ROW
     wh = Setting("SAPWarehouse"): If wh = "" Then wh = "240"
 
     folder = Environ$("TEMP")
@@ -302,29 +303,66 @@ Public Sub UpdateSAP()
     End If
     On Error GoTo Fail
 
+    ' step 1: transaction + warehouse + execute
+    stp = "1 - start transaction " & SAP_TCODE
     Application.StatusBar = "SAP: running " & SAP_TCODE & " ..."
     sess.findById("wnd[0]/tbar[0]/okcd").Text = "/n" & SAP_TCODE
     sess.findById("wnd[0]").sendVKey 0
+    stp = "2 - enter warehouse number " & wh & " (field S1_LGNUM)"
     sess.findById("wnd[0]/usr/ctxtS1_LGNUM").Text = wh
-    sess.findById("wnd[0]/tbar[1]/btn[8]").press
-    ' choose layout
-    sess.findById("wnd[0]/tbar[1]/btn[33]").press
-    sess.findById("wnd[1]/usr/lbl[1," & SAP_LAYOUT_ROW & "]").SetFocus
-    sess.findById("wnd[1]").sendVKey 2
-    ' List > Export > Spreadsheet
+    stp = "3 - execute (F8)"
+    sess.findById("wnd[0]").sendVKey 8
+
+    ' step 2: choose layout (by name; asks you if the name is unknown)
+    stp = "4 - open 'Choose layout' (Ctrl+F9)"
+    sess.findById("wnd[0]").sendVKey 33
+    If Not SapExists(sess, "wnd[1]") Then Err.Raise vbObjectError + 501, , "the 'Choose layout' window did not open."
+    stp = "5 - pick the layout in the list"
+    layoutName = Setting("SAPLayout")
+    If Not PickSapLayout(sess, layoutName, found) Then
+        ans = Trim$(InputBox("The SAP layout " & IIf(layoutName = "", "(row " & SAP_LAYOUT_ROW & ")", """" & layoutName & """") & _
+                  " was not found." & vbCrLf & vbCrLf & "Layouts in SAP:" & vbCrLf & Left$(found, 700) & vbCrLf & vbCrLf & _
+                  "Type the name of the layout to use (saved on the Start sheet):", "SAP layout", layoutName))
+        If ans = "" Then
+            CloseSapPopup sess
+            Application.StatusBar = False
+            Exit Sub
+        End If
+        SetSetting "SAPLayout", ans
+        If Not PickSapLayout(sess, ans, found) Then Err.Raise vbObjectError + 502, , "layout """ & ans & """ not found. Layouts: " & Left$(found, 300)
+    End If
+
+    ' step 3: List > Export > Spreadsheet (menu, else Ctrl+Shift+F7)
+    stp = "6 - List > Export > Spreadsheet"
     Application.StatusBar = "SAP: exporting ..."
-    sess.findById("wnd[0]/mbar/menu[0]/menu[1]/menu[1]").Select
-    sess.findById("wnd[1]/tbar[0]/btn[0]").press
+    If SapExists(sess, "wnd[0]/mbar/menu[0]/menu[1]/menu[1]") Then
+        sess.findById("wnd[0]/mbar/menu[0]/menu[1]/menu[1]").Select
+    Else
+        sess.findById("wnd[0]").sendVKey 43
+    End If
+    ' format popup (only if SAP shows one)
+    stp = "7 - confirm the spreadsheet format"
+    If SapExists(sess, "wnd[1]") And Not SapExists(sess, "wnd[1]/usr/ctxtDY_PATH") Then
+        If SapExists(sess, "wnd[1]/tbar[0]/btn[0]") Then sess.findById("wnd[1]/tbar[0]/btn[0]").press
+    End If
+    ' file name popup (SAP dialog); if Windows' own Save dialog appears instead, you pick the file below
+    stp = "8 - file name dialog"
+    If SapExists(sess, "wnd[1]/usr/ctxtDY_PATH") Then
+        sess.findById("wnd[1]/usr/ctxtDY_PATH").Text = folder
+        sess.findById("wnd[1]/usr/ctxtDY_FILENAME").Text = SAP_EXPORT
+        pathSet = True
+        If SapExists(sess, "wnd[1]/tbar[0]/btn[11]") Then
+            sess.findById("wnd[1]/tbar[0]/btn[11]").press            ' Replace
+        Else
+            sess.findById("wnd[1]/tbar[0]/btn[0]").press             ' Generate
+        End If
+    End If
+    stp = "9 - back to SAP Easy Access"
     On Error Resume Next
-    sess.findById("wnd[1]/usr/ctxtDY_PATH").Text = folder
-    sess.findById("wnd[1]/usr/ctxtDY_FILENAME").Text = SAP_EXPORT
-    pathSet = (Err.Number = 0)
-    Err.Clear
-    On Error GoTo Fail
-    sess.findById("wnd[1]/tbar[0]/btn[0]").press
-    On Error Resume Next
-    sess.findById("wnd[0]/tbar[0]/okcd").Text = "/n"
-    sess.findById("wnd[0]").sendVKey 0
+    If Not SapExists(sess, "wnd[1]") Then
+        sess.findById("wnd[0]/tbar[0]/okcd").Text = "/n"
+        sess.findById("wnd[0]").sendVKey 0
+    End If
     On Error GoTo Fail
 
     If pathSet Then
@@ -335,6 +373,8 @@ Public Sub UpdateSAP()
         Application.Wait Now + TimeSerial(0, 0, 2)
     End If
     If Not pathSet Or Dir(fullPath) = "" Then
+        MsgBox "SAP did not save the export to " & fullPath & " automatically." & vbCrLf & vbCrLf & _
+               "If SAP shows a save dialog, save the file there first, then click OK and select that file.", vbInformation
         pick = Application.GetOpenFilename("Excel files (*.xls*),*.xls*", , "Select the file SAP just exported")
         If VarType(pick) = vbBoolean Then Application.StatusBar = False: Exit Sub
         fullPath = CStr(pick)
@@ -344,10 +384,123 @@ Public Sub UpdateSAP()
     Application.StatusBar = False
     Exit Sub
 Fail:
+    Dim errTxt As String
+    errTxt = Err.Description
     Application.StatusBar = False
     Application.ScreenUpdating = True
-    MsgBox "SAP update stopped: " & Err.Description & vbCrLf & vbCrLf & _
-           "Check that SAP is open on the SAP Easy Access screen and try again.", vbExclamation
+    If MsgBox("SAP update stopped at step " & stp & ":" & vbCrLf & errTxt & vbCrLf & vbCrLf & _
+              "Please send a screenshot of this message." & vbCrLf & vbCrLf & _
+              "Do you want to load an LX02 export you saved yourself instead?", vbYesNo + vbExclamation, "SAP update") = vbYes Then
+        LoadSAPFromFile
+    End If
+End Sub
+
+' True if the SAP GUI element exists (no error)
+Private Function SapExists(sess As Object, ByVal id As String) As Boolean
+    Dim o As Object
+    On Error Resume Next
+    Set o = sess.findById(id, False)
+    SapExists = Not o Is Nothing
+    Err.Clear
+End Function
+
+Private Sub CloseSapPopup(sess As Object)
+    On Error Resume Next
+    If SapExists(sess, "wnd[1]") Then sess.findById("wnd[1]").sendVKey 12
+End Sub
+
+' "Choose layout" popup: picks the layout by name (or by row SAP_LAYOUT_ROW if no name).
+' found returns the layout texts SAP shows, so you can choose one.
+Private Function PickSapLayout(sess As Object, ByVal layoutName As String, ByRef found As String) As Boolean
+    Dim usr As Object, ch As Object, i As Long, txt As String, grid As Object, r As Long, c As Variant, cols As Variant
+    found = ""
+    On Error Resume Next
+    Set usr = sess.findById("wnd[1]/usr")
+    If usr Is Nothing Then Exit Function
+
+    ' a) classic list popup (labels lbl[col,row])
+    For i = 0 To usr.Children.Count - 1
+        Set ch = usr.Children(i)
+        If ch.Type = "GuiLabel" Then
+            txt = Trim$(ch.Text)
+            If txt <> "" Then
+                If InStr(1, vbLf & found & vbLf, vbLf & txt & vbLf, vbTextCompare) = 0 Then found = found & txt & vbLf
+                If layoutName <> "" Then
+                    If StrComp(txt, layoutName, vbTextCompare) = 0 Or StrComp(Replace(txt, "/", ""), Replace(layoutName, "/", ""), vbTextCompare) = 0 Then
+                        ch.SetFocus
+                        sess.findById("wnd[1]").sendVKey 2
+                        PickSapLayout = (Err.Number = 0): Exit Function
+                    End If
+                End If
+            End If
+        End If
+    Next i
+
+    ' b) newer popup with a grid
+    Set grid = FindSapGrid(usr)
+    If Not grid Is Nothing Then
+        cols = Array("VARIANT", "TEXT", "VTEXT")
+        For r = 0 To grid.RowCount - 1
+            For Each c In cols
+                txt = "": txt = Trim$(grid.GetCellValue(r, CStr(c)))
+                If txt <> "" Then
+                    If InStr(1, vbLf & found & vbLf, vbLf & txt & vbLf, vbTextCompare) = 0 Then found = found & txt & vbLf
+                    If layoutName <> "" Then
+                        If StrComp(txt, layoutName, vbTextCompare) = 0 Or StrComp(Replace(txt, "/", ""), Replace(layoutName, "/", ""), vbTextCompare) = 0 Then
+                            Err.Clear
+                            grid.currentCellRow = r
+                            grid.selectedRows = CStr(r)
+                            grid.doubleClickCurrentCell
+                            If Err.Number <> 0 Then Err.Clear: sess.findById("wnd[1]/tbar[0]/btn[0]").press
+                            PickSapLayout = (Err.Number = 0): Exit Function
+                        End If
+                    End If
+                End If
+            Next c
+        Next r
+    End If
+
+    ' c) no name given: the row your colleague recorded
+    If layoutName = "" Then
+        Err.Clear
+        sess.findById("wnd[1]/usr/lbl[1," & SAP_LAYOUT_ROW & "]").SetFocus
+        If Err.Number = 0 Then
+            sess.findById("wnd[1]").sendVKey 2
+            PickSapLayout = (Err.Number = 0)
+        End If
+    End If
+    Err.Clear
+End Function
+
+Private Function FindSapGrid(parent As Object) As Object
+    Dim i As Long, ch As Object, g As Object
+    On Error Resume Next
+    For i = 0 To parent.Children.Count - 1
+        Set ch = parent.Children(i)
+        If ch.Type = "GuiShell" Then
+            If ch.SubType = "GridView" Then Set FindSapGrid = ch: Exit Function
+        End If
+        If ch.Children.Count > 0 Then
+            Set g = FindSapGrid(ch)
+            If Not g Is Nothing Then Set FindSapGrid = g: Exit Function
+        End If
+    Next i
+End Function
+
+' creates a setting on the Start sheet if the workbook does not have it yet
+Private Sub EnsureSetting(ByVal nm As String, ByVal rowNo As Long, ByVal label As String, ByVal hint As String)
+    Dim n As Name, ws As Worksheet
+    On Error Resume Next
+    Set n = ThisWorkbook.Names(nm)
+    On Error GoTo 0
+    If Not n Is Nothing Then Exit Sub
+    Set ws = ThisWorkbook.Worksheets(SH_START)
+    ws.Cells(rowNo, 2).Value = label
+    ws.Cells(rowNo, 3).NumberFormat = "@"
+    ws.Cells(rowNo, 3).Interior.Color = RGB(255, 249, 229)
+    ws.Cells(rowNo, 5).Value = hint
+    ws.Cells(rowNo, 5).Font.Color = RGB(128, 128, 128)
+    ThisWorkbook.Names.Add Name:=nm, RefersTo:="='" & SH_START & "'!$C$" & rowNo
 End Sub
 
 ' Alt+F8: load an LX02 export you saved yourself
