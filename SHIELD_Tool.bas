@@ -35,7 +35,7 @@ Private Const WC_DEFAULT As String = "https://lp-global-plm.abb.com/Windchill"
 
 ' ----- SAP -----
 Private Const SAP_TCODE As String = "LX02"
-Private Const SAP_LAYOUT_ROW As Long = 8          ' line of your layout in "Choose layout" (as recorded)
+Private Const SAP_ADD_COLUMN As String = "Zeugnis-Nr|Zeugnisnummer|Certificate Number"   ' column added in "Anzeigevariante aendern" (Ctrl+F8)
 Private Const SAP_EXPORT As String = "SHIELD_SAP_EXPORT.XLSX"
 Private Const DUMMY_DEFAULT As String = "GCE1093120P0111"
 
@@ -285,12 +285,11 @@ End Sub
 ' =====================================================================
 Public Sub UpdateSAP()
     Dim sess As Object, folder As String, fullPath As String, pathSet As Boolean, t As Single
-    Dim wh As String, pick As Variant, stp As String, layoutName As String, found As String, ans As String
+    Dim wh As String, pick As Variant, stp As String, added As Boolean
 
     Set sess = GetSapSession()
     If sess Is Nothing Then Exit Sub
-    EnsureSetting "SAPLayout", 34, "SAP layout (LX02)", "name of your LX02 layout - empty = you are asked / row " & SAP_LAYOUT_ROW
-    wh = Setting("SAPWarehouse"): If wh = "" Then wh = "240"
+    wh = Setting("SAPWarehouse")
 
     folder = Environ$("TEMP")
     fullPath = folder & "\" & SAP_EXPORT
@@ -303,61 +302,38 @@ Public Sub UpdateSAP()
     End If
     On Error GoTo Fail
 
-    ' step 1: transaction + warehouse + execute
+    ' steps as recorded in SAP (script recording)
     stp = "1 - start transaction " & SAP_TCODE
     Application.StatusBar = "SAP: running " & SAP_TCODE & " ..."
     sess.findById("wnd[0]/tbar[0]/okcd").Text = "/n" & SAP_TCODE
     sess.findById("wnd[0]").sendVKey 0
-    stp = "2 - enter warehouse number " & wh & " (field S1_LGNUM)"
-    sess.findById("wnd[0]/usr/ctxtS1_LGNUM").Text = wh
+    stp = "2 - warehouse number"
+    If wh <> "" And SapExists(sess, "wnd[0]/usr/ctxtS1_LGNUM") Then sess.findById("wnd[0]/usr/ctxtS1_LGNUM").Text = wh
     stp = "3 - execute (F8)"
-    sess.findById("wnd[0]").sendVKey 8
+    sess.findById("wnd[0]/tbar[1]/btn[8]").press
 
-    ' step 2: choose layout (by name; asks you if the name is unknown)
-    stp = "4 - open 'Choose layout' (Ctrl+F9)"
-    sess.findById("wnd[0]").sendVKey 33
-    If Not SapExists(sess, "wnd[1]") Then Err.Raise vbObjectError + 501, , "the 'Choose layout' window did not open."
-    stp = "5 - pick the layout in the list"
-    layoutName = Setting("SAPLayout")
-    If Not PickSapLayout(sess, layoutName, found) Then
-        ans = Trim$(InputBox("The SAP layout " & IIf(layoutName = "", "(row " & SAP_LAYOUT_ROW & ")", """" & layoutName & """") & _
-                  " was not found." & vbCrLf & vbCrLf & "Layouts in SAP:" & vbCrLf & Left$(found, 700) & vbCrLf & vbCrLf & _
-                  "Type the name of the layout to use (saved on the Start sheet):", "SAP layout", layoutName))
-        If ans = "" Then
-            CloseSapPopup sess
-            Application.StatusBar = False
-            Exit Sub
-        End If
-        SetSetting "SAPLayout", ans
-        If Not PickSapLayout(sess, ans, found) Then Err.Raise vbObjectError + 502, , "layout """ & ans & """ not found. Layouts: " & Left$(found, 300)
-    End If
+    ' Change layout (Ctrl+F8): add the column "Zeugnis-Nr"
+    stp = "4 - open 'Anzeigevariante aendern' (Ctrl+F8)"
+    sess.findById("wnd[0]/tbar[1]/btn[32]").press
+    stp = "5 - add column Zeugnis-Nr"
+    added = AddSapColumn(sess, SAP_ADD_COLUMN)          ' False = already shown (nothing to add)
+    stp = "6 - confirm the layout (green tick)"
+    sess.findById("wnd[1]/tbar[0]/btn[0]").press
 
-    ' step 3: List > Export > Spreadsheet (menu, else Ctrl+Shift+F7)
-    stp = "6 - List > Export > Spreadsheet"
+    ' List > Export > Spreadsheet
+    stp = "7 - List > Export > Spreadsheet"
     Application.StatusBar = "SAP: exporting ..."
-    If SapExists(sess, "wnd[0]/mbar/menu[0]/menu[1]/menu[1]") Then
-        sess.findById("wnd[0]/mbar/menu[0]/menu[1]/menu[1]").Select
-    Else
-        sess.findById("wnd[0]").sendVKey 43
-    End If
-    ' format popup (only if SAP shows one)
-    stp = "7 - confirm the spreadsheet format"
-    If SapExists(sess, "wnd[1]") And Not SapExists(sess, "wnd[1]/usr/ctxtDY_PATH") Then
-        If SapExists(sess, "wnd[1]/tbar[0]/btn[0]") Then sess.findById("wnd[1]/tbar[0]/btn[0]").press
-    End If
-    ' file name popup (SAP dialog); if Windows' own Save dialog appears instead, you pick the file below
-    stp = "8 - file name dialog"
+    sess.findById("wnd[0]/mbar/menu[0]/menu[1]/menu[1]").Select
+    stp = "8 - confirm the spreadsheet format"
+    If SapExists(sess, "wnd[1]") And Not SapExists(sess, "wnd[1]/usr/ctxtDY_PATH") Then sess.findById("wnd[1]/tbar[0]/btn[0]").press
+    stp = "9 - file name dialog"
     If SapExists(sess, "wnd[1]/usr/ctxtDY_PATH") Then
         sess.findById("wnd[1]/usr/ctxtDY_PATH").Text = folder
         sess.findById("wnd[1]/usr/ctxtDY_FILENAME").Text = SAP_EXPORT
         pathSet = True
-        If SapExists(sess, "wnd[1]/tbar[0]/btn[11]") Then
-            sess.findById("wnd[1]/tbar[0]/btn[11]").press            ' Replace
-        Else
-            sess.findById("wnd[1]/tbar[0]/btn[0]").press             ' Generate
-        End If
+        sess.findById("wnd[1]/tbar[0]/btn[0]").press           ' Generate
     End If
-    stp = "9 - back to SAP Easy Access"
+    stp = "10 - back to SAP Easy Access"
     On Error Resume Next
     If Not SapExists(sess, "wnd[1]") Then
         sess.findById("wnd[0]/tbar[0]/okcd").Text = "/n"
@@ -366,11 +342,12 @@ Public Sub UpdateSAP()
     On Error GoTo Fail
 
     If pathSet Then
+        Application.StatusBar = "SAP: waiting for the export file ..."
         t = Timer
         Do While Dir(fullPath) = "" And Timer - t < 30
             DoEvents
         Loop
-        Application.Wait Now + TimeSerial(0, 0, 2)
+        Application.Wait Now + TimeSerial(0, 0, 3)            ' SAP may still be writing / opening it
     End If
     If Not pathSet Or Dir(fullPath) = "" Then
         MsgBox "SAP did not save the export to " & fullPath & " automatically." & vbCrLf & vbCrLf & _
@@ -404,133 +381,40 @@ Private Function SapExists(sess As Object, ByVal id As String) As Boolean
     Err.Clear
 End Function
 
-Private Sub CloseSapPopup(sess As Object)
-    On Error Resume Next
-    If SapExists(sess, "wnd[1]") Then sess.findById("wnd[1]").sendVKey 12
-End Sub
+' In "Anzeigevariante aendern": finds the column in the list of hidden columns (right side),
+' selects it and moves it to the displayed columns. Searches by name, not by row number.
+' Returns False if the column is not in the hidden list (= already displayed).
+Private Function AddSapColumn(sess As Object, ByVal names As String) As Boolean
+    Const TBL As String = "wnd[1]/usr/tblSAPLSKBHTC_FIELD_LIST"
+    Dim tb As Object, total As Long, vis As Long, pos As Long, r As Long, txt As String, nm As Variant
 
-' "Choose layout" popup: picks the layout by name (or by row SAP_LAYOUT_ROW if no name).
-' Searches the whole popup (labels, fields, tables, grids - also nested).
-' found returns the layout texts SAP shows (or the element types, if no text could be read).
-Private Function PickSapLayout(sess As Object, ByVal layoutName As String, ByRef found As String) As Boolean
-    Dim usr As Object, hit As Object, grid As Object, r As Long, i As Long, colName As String, txt As String, types As String
-    found = ""
-    On Error Resume Next
-    Set usr = sess.findById("wnd[1]/usr")
-    If usr Is Nothing Then found = "(no 'Choose layout' window)": Exit Function
-
-    ' a) labels / fields anywhere in the popup
-    ScanSapTexts usr, layoutName, found, hit, types
-    If Not hit Is Nothing Then
-        Err.Clear
-        hit.SetFocus
-        sess.findById("wnd[1]").sendVKey 2
-        If Err.Number <> 0 Then Err.Clear: sess.findById("wnd[1]/tbar[0]/btn[0]").press
-        PickSapLayout = (Err.Number = 0)
-        Err.Clear
-        Exit Function
-    End If
-
-    ' b) grid (ALV): every column, every row
-    Set grid = FindSapGrid(usr)
-    If Not grid Is Nothing Then
-        For r = 0 To grid.RowCount - 1
-            For i = 0 To grid.ColumnOrder.Count - 1
-                colName = "": colName = grid.ColumnOrder(i)
-                txt = "": txt = Trim$(grid.GetCellValue(r, colName))
-                If txt <> "" Then
-                    AddFound found, txt
-                    If LayoutMatch(txt, layoutName) Then
-                        Err.Clear
-                        grid.setCurrentCell r, colName
-                        grid.selectedRows = CStr(r)
-                        grid.doubleClickCurrentCell
-                        If Err.Number <> 0 Then Err.Clear: sess.findById("wnd[1]/tbar[0]/btn[0]").press
-                        PickSapLayout = (Err.Number = 0)
-                        Err.Clear
-                        Exit Function
-                    End If
+    Set tb = sess.findById(TBL)
+    total = tb.RowCount
+    vis = tb.VisibleRowCount: If vis < 1 Then vis = 1
+    pos = 0
+    Do While pos < total
+        If pos > 0 Then
+            tb.VerticalScrollbar.Position = pos
+            Set tb = sess.findById(TBL)                       ' SAP rebuilds the table after scrolling
+        End If
+        For r = 0 To vis - 1
+            If pos + r >= total Then Exit For
+            txt = ""
+            On Error Resume Next
+            txt = Trim$(sess.findById(TBL & "/txtGT_FIELD_LIST-SELTEXT[0," & r & "]").Text)
+            On Error GoTo 0
+            For Each nm In Split(names, "|")
+                If StrComp(txt, CStr(nm), vbTextCompare) = 0 Then
+                    tb.getAbsoluteRow(pos + r).Selected = True
+                    sess.findById("wnd[1]/usr/btnAPP_WL_SING").press
+                    AddSapColumn = True
+                    Exit Function
                 End If
-            Next i
+            Next nm
         Next r
-    End If
-
-    ' c) no name given: the row your colleague recorded
-    If layoutName = "" Then
-        Err.Clear
-        sess.findById("wnd[1]/usr/lbl[1," & SAP_LAYOUT_ROW & "]").SetFocus
-        If Err.Number = 0 Then
-            sess.findById("wnd[1]").sendVKey 2
-            PickSapLayout = (Err.Number = 0)
-        End If
-    End If
-    If found = "" Then found = "(list could not be read - SAP element types: " & Trim$(types) & ")"
-    Err.Clear
+        pos = pos + vis
+    Loop
 End Function
-
-Private Sub ScanSapTexts(parent As Object, ByVal layoutName As String, ByRef found As String, ByRef hit As Object, ByRef types As String)
-    Dim i As Long, n As Long, ch As Object, t As String, txt As String
-    On Error Resume Next
-    n = 0: n = parent.Children.Count
-    For i = 0 To n - 1
-        Set ch = Nothing: Set ch = parent.Children(i)
-        If Not ch Is Nothing Then
-            t = "": t = ch.Type
-            If InStr(" " & types & " ", " " & t & " ") = 0 Then types = types & " " & t
-            If t = "GuiLabel" Or t = "GuiTextField" Or t = "GuiCTextField" Then
-                txt = "": txt = Trim$(ch.Text)
-                If txt <> "" Then
-                    AddFound found, txt
-                    If hit Is Nothing And LayoutMatch(txt, layoutName) Then Set hit = ch
-                End If
-            End If
-            If t <> "GuiShell" Then ScanSapTexts ch, layoutName, found, hit, types
-        End If
-    Next i
-    Err.Clear
-End Sub
-
-Private Function LayoutMatch(ByVal txt As String, ByVal layoutName As String) As Boolean
-    txt = LCase$(Replace(Replace(Trim$(txt), "/", ""), " ", ""))
-    layoutName = LCase$(Replace(Replace(Trim$(layoutName), "/", ""), " ", ""))
-    If layoutName = "" Then Exit Function
-    LayoutMatch = (txt = layoutName)
-End Function
-
-Private Sub AddFound(ByRef found As String, ByVal txt As String)
-    If InStr(1, vbLf & found & vbLf, vbLf & txt & vbLf, vbTextCompare) = 0 Then found = found & txt & vbLf
-End Sub
-
-Private Function FindSapGrid(parent As Object) As Object
-    Dim i As Long, ch As Object, g As Object
-    On Error Resume Next
-    For i = 0 To parent.Children.Count - 1
-        Set ch = parent.Children(i)
-        If ch.Type = "GuiShell" Then
-            If ch.SubType = "GridView" Then Set FindSapGrid = ch: Exit Function
-        End If
-        If ch.Children.Count > 0 Then
-            Set g = FindSapGrid(ch)
-            If Not g Is Nothing Then Set FindSapGrid = g: Exit Function
-        End If
-    Next i
-End Function
-
-' creates a setting on the Start sheet if the workbook does not have it yet
-Private Sub EnsureSetting(ByVal nm As String, ByVal rowNo As Long, ByVal label As String, ByVal hint As String)
-    Dim n As Name, ws As Worksheet
-    On Error Resume Next
-    Set n = ThisWorkbook.Names(nm)
-    On Error GoTo 0
-    If Not n Is Nothing Then Exit Sub
-    Set ws = ThisWorkbook.Worksheets(SH_START)
-    ws.Cells(rowNo, 2).Value = label
-    ws.Cells(rowNo, 3).NumberFormat = "@"
-    ws.Cells(rowNo, 3).Interior.Color = RGB(255, 249, 229)
-    ws.Cells(rowNo, 5).Value = hint
-    ws.Cells(rowNo, 5).Font.Color = RGB(128, 128, 128)
-    ThisWorkbook.Names.Add Name:=nm, RefersTo:="='" & SH_START & "'!$C$" & rowNo
-End Sub
 
 ' Alt+F8: load an LX02 export you saved yourself
 Public Sub LoadSAPFromFile()
