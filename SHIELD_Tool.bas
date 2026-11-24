@@ -410,53 +410,48 @@ Private Sub CloseSapPopup(sess As Object)
 End Sub
 
 ' "Choose layout" popup: picks the layout by name (or by row SAP_LAYOUT_ROW if no name).
-' found returns the layout texts SAP shows, so you can choose one.
+' Searches the whole popup (labels, fields, tables, grids - also nested).
+' found returns the layout texts SAP shows (or the element types, if no text could be read).
 Private Function PickSapLayout(sess As Object, ByVal layoutName As String, ByRef found As String) As Boolean
-    Dim usr As Object, ch As Object, i As Long, txt As String, grid As Object, r As Long, c As Variant, cols As Variant
+    Dim usr As Object, hit As Object, grid As Object, r As Long, i As Long, colName As String, txt As String, types As String
     found = ""
     On Error Resume Next
     Set usr = sess.findById("wnd[1]/usr")
-    If usr Is Nothing Then Exit Function
+    If usr Is Nothing Then found = "(no 'Choose layout' window)": Exit Function
 
-    ' a) classic list popup (labels lbl[col,row])
-    For i = 0 To usr.Children.Count - 1
-        Set ch = usr.Children(i)
-        If ch.Type = "GuiLabel" Then
-            txt = Trim$(ch.Text)
-            If txt <> "" Then
-                If InStr(1, vbLf & found & vbLf, vbLf & txt & vbLf, vbTextCompare) = 0 Then found = found & txt & vbLf
-                If layoutName <> "" Then
-                    If StrComp(txt, layoutName, vbTextCompare) = 0 Or StrComp(Replace(txt, "/", ""), Replace(layoutName, "/", ""), vbTextCompare) = 0 Then
-                        ch.SetFocus
-                        sess.findById("wnd[1]").sendVKey 2
-                        PickSapLayout = (Err.Number = 0): Exit Function
-                    End If
-                End If
-            End If
-        End If
-    Next i
+    ' a) labels / fields anywhere in the popup
+    ScanSapTexts usr, layoutName, found, hit, types
+    If Not hit Is Nothing Then
+        Err.Clear
+        hit.SetFocus
+        sess.findById("wnd[1]").sendVKey 2
+        If Err.Number <> 0 Then Err.Clear: sess.findById("wnd[1]/tbar[0]/btn[0]").press
+        PickSapLayout = (Err.Number = 0)
+        Err.Clear
+        Exit Function
+    End If
 
-    ' b) newer popup with a grid
+    ' b) grid (ALV): every column, every row
     Set grid = FindSapGrid(usr)
     If Not grid Is Nothing Then
-        cols = Array("VARIANT", "TEXT", "VTEXT")
         For r = 0 To grid.RowCount - 1
-            For Each c In cols
-                txt = "": txt = Trim$(grid.GetCellValue(r, CStr(c)))
+            For i = 0 To grid.ColumnOrder.Count - 1
+                colName = "": colName = grid.ColumnOrder(i)
+                txt = "": txt = Trim$(grid.GetCellValue(r, colName))
                 If txt <> "" Then
-                    If InStr(1, vbLf & found & vbLf, vbLf & txt & vbLf, vbTextCompare) = 0 Then found = found & txt & vbLf
-                    If layoutName <> "" Then
-                        If StrComp(txt, layoutName, vbTextCompare) = 0 Or StrComp(Replace(txt, "/", ""), Replace(layoutName, "/", ""), vbTextCompare) = 0 Then
-                            Err.Clear
-                            grid.currentCellRow = r
-                            grid.selectedRows = CStr(r)
-                            grid.doubleClickCurrentCell
-                            If Err.Number <> 0 Then Err.Clear: sess.findById("wnd[1]/tbar[0]/btn[0]").press
-                            PickSapLayout = (Err.Number = 0): Exit Function
-                        End If
+                    AddFound found, txt
+                    If LayoutMatch(txt, layoutName) Then
+                        Err.Clear
+                        grid.setCurrentCell r, colName
+                        grid.selectedRows = CStr(r)
+                        grid.doubleClickCurrentCell
+                        If Err.Number <> 0 Then Err.Clear: sess.findById("wnd[1]/tbar[0]/btn[0]").press
+                        PickSapLayout = (Err.Number = 0)
+                        Err.Clear
+                        Exit Function
                     End If
                 End If
-            Next c
+            Next i
         Next r
     End If
 
@@ -469,8 +464,42 @@ Private Function PickSapLayout(sess As Object, ByVal layoutName As String, ByRef
             PickSapLayout = (Err.Number = 0)
         End If
     End If
+    If found = "" Then found = "(list could not be read - SAP element types: " & Trim$(types) & ")"
     Err.Clear
 End Function
+
+Private Sub ScanSapTexts(parent As Object, ByVal layoutName As String, ByRef found As String, ByRef hit As Object, ByRef types As String)
+    Dim i As Long, n As Long, ch As Object, t As String, txt As String
+    On Error Resume Next
+    n = 0: n = parent.Children.Count
+    For i = 0 To n - 1
+        Set ch = Nothing: Set ch = parent.Children(i)
+        If Not ch Is Nothing Then
+            t = "": t = ch.Type
+            If InStr(" " & types & " ", " " & t & " ") = 0 Then types = types & " " & t
+            If t = "GuiLabel" Or t = "GuiTextField" Or t = "GuiCTextField" Then
+                txt = "": txt = Trim$(ch.Text)
+                If txt <> "" Then
+                    AddFound found, txt
+                    If hit Is Nothing And LayoutMatch(txt, layoutName) Then Set hit = ch
+                End If
+            End If
+            If t <> "GuiShell" Then ScanSapTexts ch, layoutName, found, hit, types
+        End If
+    Next i
+    Err.Clear
+End Sub
+
+Private Function LayoutMatch(ByVal txt As String, ByVal layoutName As String) As Boolean
+    txt = LCase$(Replace(Replace(Trim$(txt), "/", ""), " ", ""))
+    layoutName = LCase$(Replace(Replace(Trim$(layoutName), "/", ""), " ", ""))
+    If layoutName = "" Then Exit Function
+    LayoutMatch = (txt = layoutName)
+End Function
+
+Private Sub AddFound(ByRef found As String, ByVal txt As String)
+    If InStr(1, vbLf & found & vbLf, vbLf & txt & vbLf, vbTextCompare) = 0 Then found = found & txt & vbLf
+End Sub
 
 Private Function FindSapGrid(parent As Object) As Object
     Dim i As Long, ch As Object, g As Object
